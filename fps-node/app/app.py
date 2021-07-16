@@ -2,6 +2,7 @@ import time
 import json
 import socket
 import requests
+import threading
 
 from flask import Flask, render_template
 
@@ -27,9 +28,8 @@ class FpsCalculator():
         self.fps = 0.0
 
 
-fps_calc = FpsCalculator()
 local_docker_network_ip = None
-app = Flask(__name__)
+cached_response = { "message": "Empty" }
 
 
 def get_target():
@@ -41,21 +41,53 @@ def get_target():
     return target
 
 
+class GetThread(threading.Thread):
+    """GetThread
+
+    This thread bangs and issues GET towards the upstream Container, in
+    order to measure the maximum FPS achieved by the pipeline (proceeding
+    this Fps Node).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.fps_calc = FpsCalculator()
+        self.running = False
+
+    def run(self):
+        global cached_response
+        self.running = True
+        while self.running:
+            # Try to GET again as soon as we receive response from the
+            # previous GET
+            try:
+                upstream_container = f"http://{get_target()}:8080/get"
+                response = requests.get(upstream_container)
+                if response.status_code == 200:
+                    j = response.json()
+                    j["fps"] = self.fps_calc.update()
+                    cached_response = j
+            except Exception as e:
+                print(e)
+
+    def stop(self):
+        self.running = False
+        self.join()
+
+
+app = Flask(__name__)
+
+
 @app.route("/get")
 def get():
-    try:
-        upstream_container = f"http://{get_target()}:8080/get"
-        response = requests.get(upstream_container)
-        if response.status_code == 200:
-            j = response.json()
-            j["fps"] = fps_calc.update()
-            return app.response_class(
-                response=json.dumps(j),
-                status=200,
-                mimetype='application/json')
-    except Exception as e:
-        print(e)
+    return app.response_class(
+        response=json.dumps(cached_response),
+        status=200,
+        mimetype='application/json')
 
 
 if __name__ == "__main__":
+    get_thread = GetThread()
+    get_thread.start()
     app.run(debug=False, host='0.0.0.0', port=8080)
+    get_thread.stop()
